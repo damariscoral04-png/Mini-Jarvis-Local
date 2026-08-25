@@ -1,0 +1,8 @@
+openai-whisper
+pyttsx3
+ollama
+sounddevice
+soundfile
+numpy==1.26.4
+transformers
+torch
