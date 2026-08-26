@@ -1,61 +1,88 @@
 # Mini-JARVIS — Asistente de voz inteligente
-Proyecto Integrador | Redes Neuronales | CENESTUR
 
-## Descripción
-Asistente conversacional local que implementa el pipeline STT → LLM → TTS
-sobre la arquitectura Transformer, con memoria de conversación y manejo de
-errores. Se puede interactuar por voz o por texto en cualquier turno.
+## ¿Qué es Mini-JARVIS?
+Mini-JARVIS es un asistente que puedes usar hablando o escribiendo. Tú le
+preguntas algo, él lo piensa y te responde en voz alta. Además recuerda lo
+que se habló antes en la misma conversación, para poder hacer preguntas
+de seguimiento.
 
-## Modos de uso
-- 🎤 **Por voz:** presiona ENTER y habla por el micrófono
-- ⌨️ **Por texto:** escribe tu pregunta directamente
-- 🔊 **Salida:** la respuesta siempre se reproduce por voz
+Todo el pipeline corre **de forma local**: el reconocimiento de voz (STT),
+el modelo de lenguaje (LLM) y la síntesis de voz (TTS) funcionan sin
+depender de servicios externos por internet.
 
-## Estructura del proyecto
-```
+## ¿Cómo se usa?
+- **Hablando:** presiona ENTER sin escribir nada y habla por el micrófono.
+- **Escribiendo:** escribe tu pregunta y presiona ENTER.
+- **La respuesta** siempre se escucha en voz alta.
+- **Para cerrarlo:** di o escribe "salir", o presiona Ctrl+C en la terminal.
+
+## ¿Qué necesitas instalar antes de usarlo?
+
+### 1. Ollama (el programa que hace pensar al asistente)
+Descárgalo de https://ollama.com/download
+
+Una vez instalado, abre una terminal y escribe:  ollama pull llama3.2:1b
+Esto descarga el "cerebro" del asistente (solo se hace una vez).
+
+### 2. Modelo de voz de Vosk (para que entienda lo que dices, sin internet)
+1. Entra a https://alphacephei.com/vosk/models
+2. Descarga el modelo en español **`vosk-model-small-es-0.42`** (~39 MB).
+3. Descomprime el .zip. Vas a obtener una carpeta llamada
+   `vosk-model-small-es-0.42`.
+4. Mueve esa carpeta completa a la raíz del proyecto (junto a
+   `Asistente.py`) y renómbrala a **`modelo_vosk`**.
+
+La estructura final debe verse así:
+
 Mini-Jarvis-vc/
-├── Asistente.py         → asistente completo (voz y texto)
-├── exploracion.py        → módulo de exploración del modelo (tokenización, embeddings, atención)
-├── Requerimientos.txt     → dependencias
-├── .gitignore
-├── Readme.md
-└── ffmpeg.exe
-```
+└── modelo-vosk/
+    ├── am/
+    ├── conf/
+    ├── graph/
+    └── ivector/
 
-## Instalación
-```bash
+
+> Esta carpeta **no está incluida en el repositorio** (pesa varios MB y no
+> es contenido propio del equipo), por eso hay que descargarla aparte.
+> Sin ella, el programa no va a poder cargar el reconocimiento de voz.
+
+### 3. Librerías de Python
+
 pip install -r Requerimientos.txt
-```
-Necesitas además tener **Ollama** instalado y corriendo, con el modelo descargado:
-```bash
-ollama pull llama3.2
-```
-Y **ffmpeg** instalado en el sistema (o su ejecutable disponible en el PATH) para que
-Whisper pueda procesar el audio.
 
-## Ejecución
-```bash
-# Asistente de voz y texto
-python Asistente.py
+## Micrófono
+Usamos el celular como micrófono con la app **WO Mic**, porque el
+micrófono de la laptop no funciona:
+1. Abre **WO Mic Client** en la laptop y conéctalo al celular (por USB o
+   WiFi). Debe decir "Connected". Solo funciona con Android y iPhone.
+2. Al abrir `Asistente.py`, el programa busca el micrófono del celular
+   solo. Si no lo encuentra, te muestra una lista de micrófonos para que
+   elijas cuál usar.
 
-# Exploración de la arquitectura Transformer
+## Cómo ejecutarlo
+Con Ollama ya abierto en la laptop:   python Asistente.py
+
+También hay un segundo programa aparte, `exploracion.py`, que sirve solo
+para mostrarle cómo el modelo procesa una frase por dentro
+(no es parte del asistente):     
+
 python exploracion.py
-```
 
-## Proceso interno del modelo (identificación)
-1. **Tokenización**: el texto se divide en tokens (~30-50 según el idioma).
-2. **Embedding**: cada token se convierte en un vector de alta dimensión.
-3. **Atención + feed-forward**: cada token "mira" a todos los demás para
-   construir una representación contextual.
-4. **Actualización por contexto**: cada capa refina el significado del token.
-5. **Predicción con softmax**: se calcula la probabilidad del siguiente token.
-6. **Repetición**: el proceso se repite hasta terminar la respuesta.
 
-Ver `exploracion.py` para la demostración con una frase de ejemplo real.
+## Archivos del proyecto
+Mini-Jarvis-vc/
+├── Asistente.py          → el asistente en sí (voz y texto)
+├── exploracion.py        → muestra cómo piensa el modelo por dentro
+├── Requerimientos.txt    → lista de librerías de Python que hay que instalar
+├── modelo-vosk/          → modelo de voz de Vosk 
+├── .gitignore
+└── Readme.md
 
-## Limitaciones conocidas
-- Alucinaciones (puede inventar información).
-- Dificultad con razonamiento matemático exacto.
-- Pérdida de contexto en conversaciones muy largas.
-- Sesgos heredados del corpus de entrenamiento.
-- No tiene memoria real fuera del contexto de la conversación actual.
+## Cosas que el asistente todavía no hace bien
+- A veces puede inventar información que no es cierta es decir alucinaciones.
+- No es bueno haciendo cuentas matemáticas exactas.
+- Si la conversación es muy larga, puede olvidar cosas de al principio.
+- El reconocimiento de voz (Vosk) es offline y liviano, así que a veces
+  entiende mal frases muy cortas o con mucho ruido de fondo — es un poco
+  menos preciso que servicios en la nube como Google, pero no necesita
+  internet para funcionar.

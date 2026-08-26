@@ -1,8 +1,6 @@
-openai-whisper
-pyttsx3
-ollama
 sounddevice
-soundfile
+vosk
+pyttsx3
 numpy==1.26.4
 transformers
 torch

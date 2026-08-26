@@ -1,233 +1,196 @@
-# ==================================================
-# MINI-JARVIS - Asistente de voz inteligente
-# Proyecto: Redes Neuronales | CENESTUR
-# Pipeline: STT (Whisper) -> LLM (Ollama) -> TTS (pyttsx3)
-# ==================================================
+"""
+Mini-JARVIS
+Asistente de voz local: STT (Vosk) -> LLM (Ollama) -> TTS (pyttsx3)
+"""
 
-import os
-import numpy as np
 import sounddevice as sd
-import soundfile as sf
-import whisper
 import pyttsx3
 import ollama
+import json
+from vosk import Model, KaldiRecognizer, SetLogLevel
 
-# ---------------- CONFIGURACIÓN ----------------
-SYSTEM_PROMPT = """Eres Mini-JARVIS, un asistente virtual inteligente, preciso y conciso.
-Responde de forma clara, profesional y breve. Sé útil y directo."""
+SetLogLevel(-1)  # oculta los mensajes internos (LOG/WARNING) de la librería Vosk
 
-MODELO_LLM = "llama3.2"        # modelo servido localmente por Ollama
-TEMPERATURA = 0.7
-MAX_TOKENS = 512
-TURNOS_DE_MEMORIA = 3           # cuántos turnos (usuario+asistente) recuerda el asistente
-DURACION_ESCUCHA = 5            # segundos que graba el micrófono por turno
-AUDIO_TEMPORAL = "audio_temporal.wav"
+# ============================================================
+# CONFIGURACIÓN DEL LLM
+# ============================================================
+MODEL = "llama3.2:1b"
+MAX_TURNOS_MEMORIA = 5
 
-# ---------------- INICIALIZACIÓN ----------------
-print("Cargando modelos, un momento...")
-motor_voz = pyttsx3.init()
-motor_voz.setProperty('rate', 150)  
-motor_voz.setProperty('volume', 0.9)  
-modelo_whisper = whisper.load_model("base")
-historial_conversacion = []
+SYSTEM_PROMPT = (
+    "Eres Mini-JARVIS, asistente de Damaris. Respondes cualquier pregunta del "
+    "usuario de forma útil, corta, en español."
+    "pero puedes hablar de cualquier tema."
+)
+
+# ============================================================
+# CONFIGURACIÓN DEL STT LOCAL (VOSK)
+# ============================================================
+RUTA_MODELO_VOSK = "modelo_vosk"
+
+# ============================================================
+# MEMORIA DE CONVERSACIÓN
+# ============================================================
+historial = [{"role": "system", "content": SYSTEM_PROMPT}]
 
 
-def obtener_dispositivo_entrada():
-    """
-    Busca el micrófono a través del host API MME de Windows.
-    El error 'could not create a primitive' suele venir de los host APIs
-    DirectSound o WASAPI fallando al negociar el formato de audio con el
-    driver. MME es más simple y compatible, así que se fuerza su uso en
-    vez de dejar que Windows elija automáticamente.
-    """
+# ============================================================
+# DISPOSITIVOS DE AUDIO
+# ============================================================
+def listar_dispositivos():
+    """Muestra todos los dispositivos de entrada de audio detectados por el sistema."""
+    print("\n--- Dispositivos de audio de ENTRADA disponibles ---")
+    for i, d in enumerate(sd.query_devices()):
+        if d['max_input_channels'] > 0:
+            print(f"  [{i}] {d['name']}  (canales de entrada: {d['max_input_channels']})")
+    print("-----------------------------------------------------\n")
+
+
+def obtener_device():
+    """Selecciona el micrófono a usar (prioriza uno con 'WO Mic' en el nombre)."""
+    dispositivos = sd.query_devices()
+
+    for i, d in enumerate(dispositivos):
+        if "wo mic" in d['name'].lower() and d['max_input_channels'] > 0:
+            print(f"[Usando micrófono:] {d['name']}")
+            return i, int(d['default_samplerate'])
+
+    print(" No encontré automáticamente un dispositivo con 'WO Mic' en el nombre.")
+    print(" (Revisa que WO Mic Client esté abierto y conectado, y que el driver")
+    print(" virtual 'WO Mic Device' esté instalado en Windows, no solo la app.)")
+    listar_dispositivos()
+
     try:
-        for api in sd.query_hostapis():
-            if api["name"] == "MME" and api["default_input_device"] != -1:
-                return api["default_input_device"]
-    except Exception:
-        pass
-    return None  # si no se encuentra MME, se deja que sounddevice use su default
+        idx = input("Escribe el número del dispositivo a usar (ENTER = micrófono por defecto): ").strip()
+        if idx == "":
+            info = sd.query_devices(kind='input')
+            print(f"Usando micrófono por defecto: {info['name']}")
+            return None, int(info['default_samplerate'])
+        idx = int(idx)
+        print(f"Usando micrófono: {dispositivos[idx]['name']}")
+        return idx, int(dispositivos[idx]['default_samplerate'])
+    except (ValueError, IndexError):
+        print("Entrada inválida, uso el micrófono por defecto del sistema.")
+        return None, 44100
 
 
-DISPOSITIVO_ENTRADA = obtener_dispositivo_entrada()
-
-
-def obtener_frecuencia_microfono():
-    """
-    Devuelve la frecuencia de muestreo nativa del micrófono (vía MME).
-    Forzar una frecuencia fija (ej. 16000 Hz) puede fallar en Windows si
-    el dispositivo no la soporta directamente. Whisper igual necesita
-    16000 Hz, pero convierte el audio automáticamente al leer el archivo,
-    así que grabamos a la frecuencia nativa y dejamos que Whisper haga
-    esa conversión.
-    """
+# ============================================================
+# STT - RECONOCIMIENTO DE VOZ (VOSK, OFFLINE)
+# ============================================================
+def cargar_modelo_vosk():
+    """Carga el modelo de reconocimiento de voz offline (Vosk) desde RUTA_MODELO_VOSK."""
+    print("[ Cargando modelo de voz local (Vosk)... ]")
     try:
-        info = sd.query_devices(DISPOSITIVO_ENTRADA, kind="input")
-        return int(info["default_samplerate"])
-    except Exception:
-        return 44100  # valor típico de respaldo si no se puede consultar
+        modelo = Model(RUTA_MODELO_VOSK)
+    except Exception as e:
+        print(f" Error al cargar el modelo de Vosk: {e}")
+        print(f"   (¿Existe la carpeta '{RUTA_MODELO_VOSK}' junto a este script,")
+        print("    con el modelo de https://alphacephei.com/vosk/models descomprimido?)")
+        raise
+    print("[ Modelo de voz cargado ]")
+    return modelo
 
 
-def verificar_microfono():
-    """Detecta si hay un dispositivo de entrada de audio disponible.
-    Esto ayuda a diagnosticar de entrada si un fallo del mic es de
-    hardware/drivers y no del código."""
+def escuchar(dev, freq, modelo_vosk):
+    """Graba audio del micrófono durante 8 segundos y lo transcribe a texto con Vosk."""
+    print("\n[ Escuchando ] (8 seg)...")
     try:
-        dispositivo = sd.query_devices(DISPOSITIVO_ENTRADA, kind="input")
-        print(f"Micrófono detectado: {dispositivo['name']} (host API: MME)")
-        print(f"Frecuencia de grabación: {obtener_frecuencia_microfono()} Hz")
-    except Exception as error:
-        print("AVISO: no se detectó un micrófono de entrada por defecto.")
-        print(f"Detalle: {error}")
-        print("El modo de texto seguirá funcionando con normalidad.")
+        audio = sd.rec(int(8 * freq), samplerate=freq, channels=1, dtype='int16', device=dev)
+        sd.wait()
+    except Exception as e:
+        print(f" Error al grabar audio: {e}")
+        return ""
+
+    reconocedor = KaldiRecognizer(modelo_vosk, freq)
+
+    try:
+        reconocedor.AcceptWaveform(audio.tobytes())
+        resultado = json.loads(reconocedor.Result())
+        texto = resultado.get("text", "").strip()
+    except Exception as e:
+        print(f" Error al reconocer el audio: {e}")
+        return ""
+
+    if not texto:
+        print(" No logré entender lo que dijiste, intenta de nuevo.")
+        return ""
+
+    print(f"TÚ: {texto}")
+    return texto
 
 
-verificar_microfono()
-print("Sistema listo.\n")
-
-
-# ---------------- TTS: TEXTO -> VOZ ----------------
+# ============================================================
+# TTS - SÍNTESIS DE VOZ
+# ============================================================
 def hablar(texto):
-    """Convierte la respuesta del LLM en voz y la reproduce por los parlantes."""
-    print(f"Mini-JARVIS: {texto}")
-    motor_voz.say(texto)
-    motor_voz.runAndWait()
+    """Convierte texto en voz y lo reproduce por los parlantes/audífonos."""
+    print(f"JARVIS: {texto}")
+    motor = pyttsx3.init()
+    motor.setProperty('rate', 185)
+    motor.say(texto)
+    motor.runAndWait()
+    motor.stop()
 
 
-# ---------------- STT: VOZ -> TEXTO ----------------
-def escuchar():
-    """
-    Graba audio del micrófono y lo transcribe a texto con Whisper.
-    Si no logra reconocer nada (silencio, ruido, error de audio),
-    devuelve una cadena vacía en vez de detener el programa.
-    """
-    print(f"\nEscuchando... habla ahora ({DURACION_ESCUCHA} segundos)")
-    texto_reconocido = ""
-    try:
-        frecuencia = obtener_frecuencia_microfono()
+# ============================================================
+# LLM - MOTOR DE RAZONAMIENTO (OLLAMA)
+# ============================================================
+def preguntar_llm(pregunta):
+    """Envía la pregunta junto con el historial de conversación al LLM y devuelve la respuesta."""
+    print("[ Pensando...]")
 
-        # Algunos drivers de audio en Windows rechazan la grabación en
-        # mono (1 canal) y solo aceptan estéreo (2 canales). Se prueba
-        # primero con 1 canal y, si falla, se reintenta con 2 antes de
-        # rendirse.
-        audio = None
-        ultimo_error = None
-        for canales in (1, 2):
-            try:
-                audio = sd.rec(
-                    int(DURACION_ESCUCHA * frecuencia),
-                    samplerate=frecuencia,
-                    channels=canales,
-                    dtype=np.float32,
-                    device=DISPOSITIVO_ENTRADA,
-                )
-                sd.wait()
-                break
-            except Exception as error:
-                ultimo_error = error
-                audio = None
-
-        if audio is None:
-            raise ultimo_error
-
-        sf.write(AUDIO_TEMPORAL, audio, frecuencia)
-
-        # Whisper convierte automáticamente el audio del archivo a 16000 Hz,
-        # sin importar a qué frecuencia o canales se haya grabado.
-        resultado = modelo_whisper.transcribe(AUDIO_TEMPORAL, language="es", fp16=False)
-        texto_reconocido = resultado["text"].strip()
-
-    except Exception as error:
-        print(f"Error capturando o transcribiendo audio: {error}")
-
-    finally:
-        if os.path.exists(AUDIO_TEMPORAL):
-            os.remove(AUDIO_TEMPORAL)
-
-    if texto_reconocido:
-        print(f"Tú dijiste: {texto_reconocido}")
-    return texto_reconocido
-
-
-# ---------------- LLM: GENERAR RESPUESTA ----------------
-def generar_respuesta(texto_usuario):
-    """
-    Envía el texto del usuario al LLM junto con el historial reciente
-    (memoria de conversación) y el system prompt que define la identidad
-    del asistente. La explicación paso a paso de cómo procesa el texto
-    el modelo (tokenización, embeddings, atención, softmax) está
-    documentada y demostrada en exploracion.py.
-    """
-    global historial_conversacion
-    historial_conversacion.append({"role": "user", "content": texto_usuario})
-
-    mensajes = [{"role": "system", "content": SYSTEM_PROMPT}]
-    mensajes += historial_conversacion[-(TURNOS_DE_MEMORIA * 2):]
+    mensajes = [historial[0]] + historial[1:][-(MAX_TURNOS_MEMORIA * 2):]
+    mensajes.append({"role": "user", "content": pregunta})
 
     try:
-        respuesta = ollama.chat(
-            model=MODELO_LLM,
-            messages=mensajes,
-            options={"temperature": TEMPERATURA, "num_predict": MAX_TOKENS},
-        )
-        texto_respuesta = respuesta["message"]["content"]
-    except Exception as error:
-        print(f"Error al llamar al LLM: {error}")
-        texto_respuesta = "Tuve un problema para generar la respuesta. ¿Puedes repetir?"
+        respuesta = ollama.chat(model=MODEL, messages=mensajes)
+        texto = respuesta['message']['content'].strip()
+    except Exception as e:
+        print(f" Error al hablar con Ollama: {e}")
+        print("   (¿Está corriendo la app de Ollama? ¿Descargaste el modelo con 'ollama pull llama3.2:1b'?)")
+        return "Tuve un problema para pensar la respuesta, ¿puedes repetir la pregunta?"
 
-    historial_conversacion.append({"role": "assistant", "content": texto_respuesta})
-    return texto_respuesta
+    if not texto:
+        texto = "No se me ocurrió una respuesta clara, ¿puedes reformular la pregunta?"
+
+    historial.append({"role": "user", "content": pregunta})
+    historial.append({"role": "assistant", "content": texto})
+    return texto
 
 
-# ---------------- ORQUESTADOR PRINCIPAL ----------------
-def main():
-    print("=" * 55)
-    print("MINI-JARVIS - Sistema de asistente local")
-    print("=" * 55)
-    print("ENTER = hablar por el micrófono | escribe tu mensaje = modo texto")
-    print("Escribe 'salir' para terminar.\n")
+# ============================================================
+# PROGRAMA PRINCIPAL
+# ============================================================
+if __name__ == "__main__":
+    print("=== MINI-JARVIS LISTO ===")
 
-    hablar("Sistema listo. Soy Mini-JARVIS. ¿En qué puedo ayudarte?")
+    dev, freq = obtener_device()
+    modelo_vosk = cargar_modelo_vosk()
 
-    while True:
-        try:
-            # Voz y texto son dos formas de entrada igual de válidas:
-            # - Si el usuario solo presiona ENTER -> se activa el micrófono.
-            # - Si el usuario escribe algo -> se usa eso directamente,
-            #   sin pasar por el micrófono en absoluto.
-            entrada = input("\n[ESPERANDO] ENTER para hablar, o escribe aquí: ")
+    hablar("Hola Soy Mini-JARVIS, ¿en qué puedo ayudarte?")
 
-            if entrada.strip() == "":
-                print("[ESCUCHANDO]")
-                texto_usuario = escuchar()
+    try:
+        while True:
+            entrada = input(
+                "\nENTER + habla por el micrófono, o escribe tu pregunta y presiona ENTER: "
+            ).strip()
 
-                # Si el micrófono no capturó nada, se reintenta el turno
-                # (no se apaga el programa, y no se fuerza a usar texto)
-                if not texto_usuario:
-                    print("[ERROR] No se reconoció audio, intenta de nuevo.")
-                    hablar("No te escuché bien, intenta de nuevo.")
-                    continue
+            if entrada == "":
+                pregunta = escuchar(dev, freq, modelo_vosk)
             else:
-                texto_usuario = entrada.strip()
+                pregunta = entrada
+                print(f"TÚ: {pregunta}")
 
-            if texto_usuario.lower() in ["salir", "terminar", "adiós", "adios"]:
-                hablar("Hasta luego. Mini-JARVIS apagado.")
+            if not pregunta:
+                continue
+
+            if "salir" in pregunta.lower():
+                hablar("Hasta luego")
                 break
 
-            print("[PENSANDO]")
-            respuesta = generar_respuesta(texto_usuario)
-
-            print("[HABLANDO]")
+            respuesta = preguntar_llm(pregunta)
             hablar(respuesta)
 
-        except KeyboardInterrupt:
-            hablar("Apagando sistema.")
-            break
-        except Exception as error:
-            print(f"[ERROR] {error}")
-            # Sin 'break': el asistente debe seguir funcionando
-            continue
-
-
-if __name__ == "__main__":
-    main()
+    except KeyboardInterrupt:
+        print("\n\n Mini-JARVIS Apagado.")
+        print("\n\n Mini-JARVIS estare aqui para lo que necesites.")
