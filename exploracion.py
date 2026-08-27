@@ -1,11 +1,6 @@
 """
 EXPLORACION DE ARQUITECTURA - Transformer
 Tokenización | Embeddings | Atención | Limitaciones
-
-Nota: Ollama (usado en Asistente.py) no expone tensores internos del
-modelo (embeddings, pesos de atención). Por eso este módulo usa un
-modelo equivalente de Hugging Face (bert-base-uncased), que sí permite
-inspeccionar esos valores con output_attentions=True.
 """
 
 from transformers import AutoTokenizer, AutoModel
@@ -69,5 +64,5 @@ def analizar_arquitectura(texto_prueba):
 
 if __name__ == "__main__":
     analizar_arquitectura(
-        "Mini-JARVIS usa inteligencia artificial basada en la arquitectura Transformer."
+        "DamJar usa inteligencia artificial basada en la arquitectura Transformer."
     )
