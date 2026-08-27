@@ -4,3 +4,4 @@ __pycache__/
 venv/
 audio_temporal.wav
 ffmpeg.exe
+modelo_vosk/
